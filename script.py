@@ -9,13 +9,14 @@ import json
 import networkx as nx
 import pandas as pd
 import pickle
+import time
 
 # --- CONFIGURATION ---
 
 random.seed(27)
 
 TESTING = True
-TEST_SHARE = .05 # So only x percent of the sample will actually be analyzed.
+TEST_SHARE = .5 # So only x percent of the sample will actually be analyzed.
 
 # Recommendations & evaluation
 TOP_K = 3 #
@@ -29,6 +30,12 @@ def _get_cache_filename(prefix, share, num_repos):
         return f"{prefix}_test_share{share}_repos{num_repos}.pkl"
     else:
         return f"{prefix}_full_repos{num_repos}.pkl"
+
+def _get_pagerank_cache_filename(prefix, share, num_repos, damping):
+    if TESTING:
+        return f"{prefix}_test_share{share}_repos{num_repos}_damp{damping}.pkl"
+    else:
+        return f"{prefix}_full_repos{num_repos}_damp{damping}.pkl"
 
 def save_graphs(G_weighted, G_unweighted, testing_share, num_repos):
     w_filename = _get_cache_filename("graph_weighted", testing_share, num_repos)
@@ -53,6 +60,28 @@ def load_graphs(testing_share, num_repos):
         print(f"[B] No cached graphs found. Building from scratch.")
         return None, None
 
+def save_pageranks(pr_weighted, pr_unweighted, testing_share, num_repos, damping):
+    w_filename = _get_pagerank_cache_filename("pagerank_weighted", testing_share, num_repos, damping)
+    u_filename = _get_pagerank_cache_filename("pagerank_unweighted", testing_share, num_repos, damping)
+    with open(w_filename, 'wb') as f:
+        pickle.dump(pr_weighted, f)
+    with open(u_filename, 'wb') as f:
+        pickle.dump(pr_unweighted, f)
+    print(f"[C] PageRank vectors cached to {w_filename} and {u_filename}")
+
+def load_pageranks(testing_share, num_repos, damping):
+    w_filename = _get_pagerank_cache_filename("pagerank_weighted", testing_share, num_repos, damping)
+    u_filename = _get_pagerank_cache_filename("pagerank_unweighted", testing_share, num_repos, damping)
+    try:
+        with open(w_filename, 'rb') as f:
+            pr_weighted = pickle.load(f)
+        with open(u_filename, 'rb') as f:
+            pr_unweighted = pickle.load(f)
+        print(f"[C] Loaded cached PageRank vectors (share {testing_share}, repos {num_repos}, damping {damping})")
+        return pr_weighted, pr_unweighted
+    except FileNotFoundError:
+        print(f"[C] No cached PageRank vectors found. Computing from scratch.")
+        return None, None
 
 # --- [A] DATA COLLECTION ---
 
@@ -168,7 +197,6 @@ def build_weighted_graph(repo_map):
         repo_size = len(contributors)
         weight_contrib = 1.0 / math.log(repo_size + 1)
 
-        # Use itertools.combinations for cleaner and slightly faster pairing
         for d_i, d_j in combinations(contributors, 2):
             if G.has_edge(d_i, d_j):
                 G[d_i][d_j]["weight"] += weight_contrib
@@ -257,6 +285,7 @@ def evaluate(G, pr_weighted, pr_unweighted, G_unweighted, seed_developers, k=TOP
 # --- MAIN ---
 
 def main():
+    begin_time = time.time()
     # [A] Collect data
     repo_map = load_data()
     num_repos = len(repo_map)
@@ -273,9 +302,17 @@ def main():
     else:
         print("[B] Using cached graphs – skipping graph construction.")
 
-    # [C] PageRank
-    pr_weighted = compute_pagerank(G_weighted)
-    pr_unweighted = compute_pagerank(G_unweighted)
+    # Try to load cached PageRank vectors
+    pr_weighted, pr_unweighted = load_pageranks(TEST_SHARE, num_repos, DAMPING_FACTOR)
+
+    if pr_weighted is None or pr_unweighted is None:
+        # [C] Compute PageRank
+        pr_weighted = compute_pagerank(G_weighted, DAMPING_FACTOR)
+        pr_unweighted = compute_pagerank(G_unweighted, DAMPING_FACTOR)
+        # Cache them
+        save_pageranks(pr_weighted, pr_unweighted, TEST_SHARE, num_repos, DAMPING_FACTOR)
+    else:
+        print("[C] Using cached PageRank vectors – skipping computation.")
 
     # Show top developers
     top_devs = sorted(pr_weighted.items(), key=lambda x: x[1], reverse=True)[:10]
@@ -304,6 +341,11 @@ def main():
     )
     eval_df.to_csv("recommendation_survey.csv", index=False)
     print("\n[E] Recommendation survey saved to recommendation_survey.csv")
+
+    elapsed_time = time.time() - begin_time
+    elapsed_minutes = round(elapsed_time / 60, 2)
+
+    print(f"\nElapsed time: {elapsed_minutes} minutes for {TEST_SHARE * 100}% of repos")
 
 
 if __name__ == "__main__":
